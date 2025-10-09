@@ -1,0 +1,428 @@
+---
+title: "Perou Lab scRNA-seq Quality Control Forcing Different Values"
+author: "Alec Lobanov"
+date: "10-29-2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,root.dir = "./")
+
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(patchwork))
+suppressPackageStartupMessages(library(gridExtra))
+```
+
+This R Markdown will highlight unavoidable differences in raw count and features between different scRNA-seq datasets. I will propose upper and lower bound cutoffs for the Perou Lab to avoid analysis and cluster differences between different lab members from here on out.
+
+
+1. Load in raw Cell Ranger outputs from three different datasets used often in lab: (Human Tumor, Human Cell line, Mouse Tumor)
+
+```{r}
+#15k
+mouse_cellline_10k <- suppressWarnings(CreateSeuratObject(Read10X(data.dir="filtered_feature_bc_matrix_10k/")))
+print(paste0("Raw 10k cell count is: ",dim(mouse_cellline_10k)[2]))
+
+#15k
+mouse_cellline_15k <- suppressWarnings(CreateSeuratObject(Read10X(data.dir="filtered_feature_bc_matrix_15k/")))
+print(paste0("Raw 15k cell count is: ",dim(mouse_cellline_15k)[2]))
+
+#20k
+mouse_cellline_20k <- suppressWarnings(CreateSeuratObject(Read10X(data.dir="filtered_feature_bc_matrix_20k/")))
+print(paste0("Raw 20k cell count is: ",dim(mouse_cellline_20k)[2]))
+
+```
+
+See if top 10k from 15 and 20k same thing as forcing
+```{r}
+top_cells <- names(sort(mouse_cellline_15k$nCount_RNA,decreasing = T))[1:10000]
+mouse_cellline_top10k <- subset(mouse_cellline_15k,cells = top_cells)
+
+table(colnames(mouse_cellline_10k) %in% colnames(mouse_cellline_top10k))
+```
+
+
+```{r}
+CreateSeuratObject(Read10X(data.dir=""))
+```
+
+
+
+
+2. Let's observe the differences in RNA features, which is a metric of how many unique genes were detected in each cell
+
+```{r}
+#10k
+plot1 <- VlnPlot(mouse_cellline_10k,features = "nFeature_RNA",layer = "counts",y.max = 12000)+NoLegend()+ggtitle("10k Forcing")
+
+#15k
+plot2 <- VlnPlot(mouse_cellline_15k,features = "nFeature_RNA",layer = "counts",y.max = 12000)+NoLegend()+ggtitle("15k Forcing")
+
+#20k
+plot3 <- VlnPlot(mouse_cellline_20k,features = "nFeature_RNA",layer = "counts",y.max = 12000)+NoLegend()+ggtitle("20k Forcing")
+
+
+suppressWarnings(grid.arrange(plot1,plot2,plot3,ncol=3,top = "RNA Features"))
+
+```
+
+- As visualized, Each different dataset type has a wide variability of unique features, making it difficult to set one strict cutoff across all dataset types.
+
+3. Let's see the differences in RNA counts, which is the total number of molecules detected in each cell.
+
+```{r}
+#10k
+plot1 <- VlnPlot(mouse_cellline_10k,features = "nCount_RNA",layer = "counts",y.max=100000)+NoLegend()+ggtitle("Human Tumor")
+
+#15k
+plot2 <- VlnPlot(mouse_cellline_15k,features = "nCount_RNA",layer = "counts",y.max=100000)+NoLegend()+ggtitle("Human Cell line")
+
+#20k
+plot3 <- VlnPlot(mouse_cellline_20k,features = "nCount_RNA",layer = "counts",y.max=100000)+NoLegend()+ggtitle("Mouse Tumor")
+
+
+suppressWarnings(grid.arrange(plot1,plot2,plot3,ncol=3,top = "RNA Counts"))
+```
+
+- The RNA counts has an even greater variability per dataset type than the RNA features, as potential doublets and triplets could have been measured. 
+
+4. Finally, let's look at mitochondrial DNA differences, as this is a potential marker of dying cells.
+
+```{r}
+#10k
+mouse_cellline_10k[["percent.mt"]] <- PercentageFeatureSet(mouse_cellline_10k, pattern = "^mt-")
+plot1 <- VlnPlot(mouse_cellline_10k,features = "percent.mt",layer = "counts",y.max=100)+NoLegend()+ggtitle("Human Tumor")
+
+#15k
+mouse_cellline_15k[["percent.mt"]] <- PercentageFeatureSet(mouse_cellline_15k, pattern = "^mt-")
+plot2 <- VlnPlot(mouse_cellline_15k,features = "percent.mt",layer = "counts",y.max=100)+NoLegend()+ggtitle("Human Cell line")
+
+#20k
+mouse_cellline_20k[["percent.mt"]] <- PercentageFeatureSet(mouse_cellline_20k, pattern = "^mt-")
+plot3 <- VlnPlot(mouse_cellline_20k,features = "percent.mt",layer = "counts",y.max=100)+NoLegend()+ggtitle("Mouse Tumor")
+# 
+
+
+suppressWarnings(grid.arrange(plot1,plot2,plot3,ncol=3,top = "Mitochondrial DNA"))
+#plot4 <- FeatureScatter(mouse_cellline_15k, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+#plot4
+```
+
+- Mitochondrial DNA still has variability, however, it is clear to see that majority of cells are within the bottom fifth of this graph.
+
+# Perou Lab standard scRNA-seq quality control cutoff
+
+It is clear to see that setting a hard cutoff for the quality control metrics would not be ideal as each dataset type has vastly different distributions and variability. It is also important to remove cells on the lower bound that have too little information to be useful and are indicative of ambient mRNA reads. Cell ranger processing automatically removes cells that have a count value below 500, and this serves as a good metric for removing bad cells. However, **cells that have a feature value less than 200 should be removed** before performing upper and lower bound metrics. 
+
+From there, I propose a cutoff that incorporates each sample's median and standard deviation to account for that specific sample's variability and dataset type. Explicitly, **cells that have a count or feature value greater than 3 standard deviations above the median and less than 1.5 standard deviations below the median should be removed**. For mitochondrial DNA percentage, since is bounded between [0,1], its ideal **to only keep cells that have a mitochondrial percentage < 20% **.  These guidelines follow what is in the literature, (You et al., 2021, Ocasio et al., 2019), and keeps the majority of cells are a part of that sample. 
+
+5. Let's add these cutoffs to our samples and see what the resulting data looks like:
+
+```{r}
+
+#Add lower-bound cutoffs
+#increased from 500 to 1500
+mouse_cellline_10k_low <- subset(mouse_cellline_10k,subset = nFeature_RNA > 1000 & percent.mt < 20)
+print(paste0("10k single cell count decreased from ",dim(mouse_cellline_10k)[2]," to ",dim(mouse_cellline_10k_low)[2]))
+
+mouse_cellline_15k_low <- subset(mouse_cellline_15k,subset = nFeature_RNA > 1000 & percent.mt < 20)
+print(paste0("15k single cell count decreased from ",dim(mouse_cellline_15k)[2]," to ",dim(mouse_cellline_15k_low)[2]))
+
+mouse_cellline_20k_low <- subset(mouse_cellline_20k,subset = nFeature_RNA > 1000 & percent.mt < 20)
+print(paste0("20k single cell count decreased from ",dim(mouse_cellline_20k)[2]," to ",dim(mouse_cellline_20k_low)[2]))
+
+```
+
+```{r}
+#Human Tumor
+ht_feature_cutoff <- median(mouse_cellline_10k_low$nFeature_RNA)+3*sd(mouse_cellline_10k_low$nFeature_RNA)
+ht_2x_feature_cutoff <- median(mouse_cellline_10k_low$nFeature_RNA)+2*sd(mouse_cellline_10k_low$nFeature_RNA)
+ht_4x_feature_cutoff <- median(mouse_cellline_10k_low$nFeature_RNA)+4*sd(mouse_cellline_10k_low$nFeature_RNA)
+
+
+plot1 <- VlnPlot(mouse_cellline_10k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Human Tumor")+
+  geom_hline(yintercept = ht_feature_cutoff,color='blue')+
+  geom_hline(yintercept = ht_2x_feature_cutoff,color='lightblue')+
+  geom_hline(yintercept = ht_4x_feature_cutoff,color='lightblue')
+
+#paste0('Human Tumor Feature Cutoffs are ',round(ht_feature_cutoff)," and ",round(ht_feature_cutoff_low))
+
+#Human Cell line
+hc_feature_cutoff <- median(mouse_cellline_15k_low$nFeature_RNA)+3*sd(mouse_cellline_15k_low$nFeature_RNA)
+hc_2x_feature_cutoff <- median(mouse_cellline_15k_low$nFeature_RNA)+2*sd(mouse_cellline_15k_low$nFeature_RNA)
+hc_4x_feature_cutoff <- median(mouse_cellline_15k_low$nFeature_RNA)+4*sd(mouse_cellline_15k_low$nFeature_RNA)
+
+
+plot2 <- VlnPlot(mouse_cellline_15k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Human Cell line")+
+  geom_hline(yintercept = hc_feature_cutoff,color='blue')+
+  geom_hline(yintercept = hc_2x_feature_cutoff,color='lightblue')+
+  geom_hline(yintercept = hc_4x_feature_cutoff,color='lightblue')
+
+#paste0('Human Cellline Feature Cutoffs are ',round(hc_feature_cutoff)," and ",round(hc_feature_cutoff_low))
+
+
+
+#Mouse Tumor
+mt_feature_cutoff <- median(mouse_cellline_20k_low$nFeature_RNA)+3*sd(mouse_cellline_20k_low$nFeature_RNA)
+mt_2x_feature_cutoff <- median(mouse_cellline_20k_low$nFeature_RNA)+2*sd(mouse_cellline_20k_low$nFeature_RNA)
+mt_4x_feature_cutoff <- median(mouse_cellline_20k_low$nFeature_RNA)+4*sd(mouse_cellline_20k_low$nFeature_RNA)
+
+plot3 <- VlnPlot(mouse_cellline_20k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Mouse Tumor")+
+  geom_hline(yintercept = mt_feature_cutoff,color='blue')+
+  geom_hline(yintercept = mt_2x_feature_cutoff,color='lightblue')+
+  geom_hline(yintercept = mt_4x_feature_cutoff,color='lightblue')
+
+#paste0('Mouse Tumor Feature Cutoffs are ',round(mt_feature_cutoff)," and ",round(mt_feature_cutoff_low))
+
+
+
+suppressWarnings(grid.arrange(plot1,plot2,plot3,ncol=3,top = "RNA Features with Cutoff Lines"))
+
+```
+
+- Now observing cutoffs on the count data
+```{r}
+#Human Tumor
+ht_count_cutoff <- median(mouse_cellline_10k_low$nCount_RNA)+3*sd(mouse_cellline_10k_low$nCount_RNA)
+ht_2x_count_cutoff <- median(mouse_cellline_10k_low$nCount_RNA)+2*sd(mouse_cellline_10k_low$nCount_RNA)
+ht_4x_count_cutoff <- median(mouse_cellline_10k_low$nCount_RNA)+4*sd(mouse_cellline_10k_low$nCount_RNA)
+
+plot1 <- VlnPlot(mouse_cellline_10k_low,features = "nCount_RNA",layer = "counts",y.max=150000)+NoLegend()+ggtitle("Human Tumor")+
+  geom_hline(yintercept = ht_count_cutoff,color='blue')+
+  geom_hline(yintercept = ht_2x_count_cutoff,color='lightblue')+
+  geom_hline(yintercept = ht_4x_count_cutoff,color='lightblue')
+paste0('Human Tumor Count Cutoff is ',round(ht_count_cutoff),", which ",round(ecdf(mouse_cellline_10k_low$nCount_RNA)(ht_count_cutoff),4), " of the data is below.")
+
+#Human Cell line
+hc_count_cutoff <- median(mouse_cellline_15k_low$nCount_RNA)+3*sd(mouse_cellline_15k_low$nCount_RNA)
+hc_2x_count_cutoff <- median(mouse_cellline_15k_low$nCount_RNA)+2*sd(mouse_cellline_15k_low$nCount_RNA)
+hc_4x_count_cutoff <- median(mouse_cellline_15k_low$nCount_RNA)+4*sd(mouse_cellline_15k_low$nCount_RNA)
+
+plot2 <- VlnPlot(mouse_cellline_15k_low,features = "nCount_RNA",layer = "counts",y.max=150000)+NoLegend()+ggtitle("Human Cell line")+
+  geom_hline(yintercept = hc_count_cutoff,color='blue')+
+  geom_hline(yintercept = hc_2x_count_cutoff,color='lightblue')+
+  geom_hline(yintercept = hc_4x_count_cutoff,color='lightblue')
+paste0('Human Cell line Count Cutoff is ',round(hc_count_cutoff),", which ",round(ecdf(mouse_cellline_15k_low$nCount_RNA)(hc_count_cutoff),4), " of the data is below.")
+
+#Mouse Tumor
+mt_count_cutoff <- median(mouse_cellline_20k_low$nCount_RNA)+3*sd(mouse_cellline_20k_low$nCount_RNA)
+mt_2x_count_cutoff <- median(mouse_cellline_20k_low$nCount_RNA)+2*sd(mouse_cellline_20k_low$nCount_RNA)
+mt_4x_count_cutoff <- median(mouse_cellline_20k_low$nCount_RNA)+4*sd(mouse_cellline_20k_low$nCount_RNA)
+
+plot3 <- VlnPlot(mouse_cellline_20k_low,features = "nCount_RNA",layer = "counts",y.max=150000)+NoLegend()+ggtitle("Mouse Tumor")+
+  geom_hline(yintercept = mt_count_cutoff,color='blue')+
+  geom_hline(yintercept = mt_2x_count_cutoff,color='lightblue')+
+  geom_hline(yintercept = mt_4x_count_cutoff,color='lightblue')
+paste0('Mouse Tumor Count Cutoff is ',round(mt_count_cutoff),", which ",round(ecdf(mouse_cellline_20k_low$nCount_RNA)(mt_count_cutoff),4), " of the data is below.")
+
+suppressWarnings(grid.arrange(plot1,plot2,plot3,ncol=3,top = "RNA Counts with Cutoff Lines"))
+
+```
+
+- Now upper-bound subsetting the data:
+
+```{r}
+
+#Add upper-bound cutoffs
+mouse_cellline_10k_fixed <- subset(mouse_cellline_10k_low,subset = nFeature_RNA < ht_feature_cutoff &
+                        nCount_RNA < ht_count_cutoff)
+print(paste0("The number of human tumor cells dropped from ",dim(mouse_cellline_10k)[[2]]," cells to ",dim(mouse_cellline_10k_fixed)[[2]]," cells"))
+
+mouse_cellline_15k_fixed <- subset(mouse_cellline_15k_low,subset = nFeature_RNA < hc_feature_cutoff &
+                           nCount_RNA < hc_count_cutoff)
+print(paste0("The number of human cell line cells dropped from ",dim(mouse_cellline_15k)[[2]]," cells to ",dim(mouse_cellline_15k_fixed)[[2]]," cells"))
+
+mouse_cellline_20k_fixed <- subset(mouse_cellline_20k_low,subset = nFeature_RNA < mt_feature_cutoff &
+                        nCount_RNA < mt_count_cutoff)
+print(paste0("The number of mouse tumor cells dropped from ",dim(mouse_cellline_20k)[[2]]," cells to ",dim(mouse_cellline_20k_fixed)[[2]]," cells"))
+
+```
+
+
+- Now we can look at each dataset type individually to see the spread of data and make sure we don't have any crazy outliers
+```{r}
+#Human Tumor
+Idents(mouse_cellline_10k_fixed) <- "Human Tumor"
+VlnPlot(mouse_cellline_10k_fixed,features = c("nFeature_RNA","nCount_RNA","percent.mt"),layer = "counts")+NoLegend()
+```
+
+```{r}
+#Human Cell line
+Idents(mouse_cellline_15k_fixed) <- "Human Cell line"
+VlnPlot(mouse_cellline_15k_fixed,features = c("nFeature_RNA","nCount_RNA","percent.mt"),layer = "counts")+NoLegend()
+```
+
+```{r}
+#Mouse Tumor
+Idents(mouse_cellline_20k_fixed) <- "Mouse Tumor"
+VlnPlot(mouse_cellline_20k_fixed,features = c("nFeature_RNA","nCount_RNA","percent.mt"),layer = "counts")+NoLegend()
+```
+
+
+
+- Each sample has removed large outliers despite different variabilities and maintaining large amounts of the original data. 
+
+
+
+```{r}
+# #Human Tumor Feature Mean Check 10k
+# ht_feature_cutoff <- median(mouse_cellline_10k_low$nFeature_RNA)+3*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_2x_feature_cutoff <- median(mouse_cellline_10k_low$nFeature_RNA)+2*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_4x_feature_cutoff <- median(mouse_cellline_10k_low$nFeature_RNA)+4*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_feature_cutoff_low <- median(mouse_cellline_10k_low$nFeature_RNA)-1.5*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_feature_cutoff_low1x<- median(mouse_cellline_10k_low$nFeature_RNA)-1*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_feature_cutoff_low2x <- median(mouse_cellline_10k_low$nFeature_RNA)-2*sd(mouse_cellline_10k_low$nFeature_RNA)
+# 
+# 
+# plot1 <- VlnPlot(mouse_cellline_10k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoff,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_low,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1x,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2x,color='darkolivegreen1')
+# 
+# paste0('Human Tumor Feature Cutoffs are ',round(ht_feature_cutoff)," and ",round(ht_feature_cutoff_low))
+# 
+# #Human Tumor Mean
+# ht_feature_cutoffm <- mean(mouse_cellline_10k_low$nFeature_RNA)+3*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_2x_feature_cutoffm <- mean(mouse_cellline_10k_low$nFeature_RNA)+2*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_4x_feature_cutoffm <- mean(mouse_cellline_10k_low$nFeature_RNA)+4*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_feature_cutoff_lowm <- mean(mouse_cellline_10k_low$nFeature_RNA)-1.5*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_feature_cutoff_low1xm<- mean(mouse_cellline_10k_low$nFeature_RNA)-1*sd(mouse_cellline_10k_low$nFeature_RNA)
+# ht_feature_cutoff_low2xm <- mean(mouse_cellline_10k_low$nFeature_RNA)-2*sd(mouse_cellline_10k_low$nFeature_RNA)
+# 
+# 
+# plot2 <- VlnPlot(mouse_cellline_10k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoffm,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_lowm,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1xm,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2xm,color='darkolivegreen1')
+# 
+# suppressWarnings(grid.arrange(plot1,plot2,ncol=2,top = "RNA Counts with Cutoff Lines"))
+```
+
+```{r}
+# #Human Tumor Count Mean Check 10K
+# ht_feature_cutoff <- median(mouse_cellline_10k_low$nCount_RNA)+3*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_2x_feature_cutoff <- median(mouse_cellline_10k_low$nCount_RNA)+2*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_4x_feature_cutoff <- median(mouse_cellline_10k_low$nCount_RNA)+4*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_feature_cutoff_low <- median(mouse_cellline_10k_low$nCount_RNA)-1.5*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_feature_cutoff_low1x<- median(mouse_cellline_10k_low$nCount_RNA)-1*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_feature_cutoff_low2x <- median(mouse_cellline_10k_low$nCount_RNA)-2*sd(mouse_cellline_10k_low$nCount_RNA)
+# 
+# 
+# plot1 <- VlnPlot(mouse_cellline_10k_low,features = "nCount_RNA",layer = "counts",y.max = 100000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoff,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_low,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1x,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2x,color='darkolivegreen1')
+# 
+# paste0('Human Tumor Feature Cutoffs are ',round(ht_feature_cutoff)," and ",round(ht_feature_cutoff_low))
+# 
+# #Human Tumor Mean
+# ht_feature_cutoffm <- mean(mouse_cellline_10k_low$nCount_RNA)+3*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_2x_feature_cutoffm <- mean(mouse_cellline_10k_low$nCount_RNA)+2*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_4x_feature_cutoffm <- mean(mouse_cellline_10k_low$nCount_RNA)+4*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_feature_cutoff_lowm <- mean(mouse_cellline_10k_low$nCount_RNA)-1.5*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_feature_cutoff_low1xm<- mean(mouse_cellline_10k_low$nCount_RNA)-1*sd(mouse_cellline_10k_low$nCount_RNA)
+# ht_feature_cutoff_low2xm <- mean(mouse_cellline_10k_low$nCount_RNA)-2*sd(mouse_cellline_10k_low$nCount_RNA)
+# 
+# 
+# plot2 <- VlnPlot(mouse_cellline_10k_low,features = "nCount_RNA",layer = "counts",y.max = 100000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoffm,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_lowm,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1xm,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2xm,color='darkolivegreen1')
+# 
+# suppressWarnings(grid.arrange(plot1,plot2,ncol=2,top = "RNA Counts with Cutoff Lines"))
+```
+
+
+```{r}
+# #Human Tumor
+# ht_feature_cutoff <- median(mouse_cellline_15k_low$nFeature_RNA)+3*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_2x_feature_cutoff <- median(mouse_cellline_15k_low$nFeature_RNA)+2*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_4x_feature_cutoff <- median(mouse_cellline_15k_low$nFeature_RNA)+4*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_feature_cutoff_low <- median(mouse_cellline_15k_low$nFeature_RNA)-1.5*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_feature_cutoff_low1x<- median(mouse_cellline_15k_low$nFeature_RNA)-1*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_feature_cutoff_low2x <- median(mouse_cellline_15k_low$nFeature_RNA)-2*sd(mouse_cellline_15k_low$nFeature_RNA)
+# 
+# 
+# plot1 <- VlnPlot(mouse_cellline_15k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoff,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_low,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1x,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2x,color='darkolivegreen1')
+# 
+# paste0('Human Tumor Feature Cutoffs are ',round(ht_feature_cutoff)," and ",round(ht_feature_cutoff_low))
+# 
+# #Human Tumor Mean
+# ht_feature_cutoffm <- mean(mouse_cellline_15k_low$nFeature_RNA)+3*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_2x_feature_cutoffm <- mean(mouse_cellline_15k_low$nFeature_RNA)+2*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_4x_feature_cutoffm <- mean(mouse_cellline_15k_low$nFeature_RNA)+4*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_feature_cutoff_lowm <- mean(mouse_cellline_15k_low$nFeature_RNA)-1.5*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_feature_cutoff_low1xm<- mean(mouse_cellline_15k_low$nFeature_RNA)-1*sd(mouse_cellline_15k_low$nFeature_RNA)
+# ht_feature_cutoff_low2xm <- mean(mouse_cellline_15k_low$nFeature_RNA)-2*sd(mouse_cellline_15k_low$nFeature_RNA)
+# 
+# 
+# plot2 <- VlnPlot(mouse_cellline_15k_low,features = "nFeature_RNA",layer = "counts",y.max = 15000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoffm,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_lowm,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1xm,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2xm,color='darkolivegreen1')
+# 
+# suppressWarnings(grid.arrange(plot1,plot2,ncol=2,top = "RNA Counts with Cutoff Lines"))
+```
+
+```{r}
+# #Human Tumor Count Mean Check 15K
+# ht_feature_cutoff <- median(mouse_cellline_15k_low$nCount_RNA)+3*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_2x_feature_cutoff <- median(mouse_cellline_15k_low$nCount_RNA)+2*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_4x_feature_cutoff <- median(mouse_cellline_15k_low$nCount_RNA)+4*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_feature_cutoff_low <- median(mouse_cellline_15k_low$nCount_RNA)-1.5*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_feature_cutoff_low1x<- median(mouse_cellline_15k_low$nCount_RNA)-1*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_feature_cutoff_low2x <- median(mouse_cellline_15k_low$nCount_RNA)-2*sd(mouse_cellline_15k_low$nCount_RNA)
+# 
+# 
+# plot1 <- VlnPlot(mouse_cellline_15k_low,features = "nCount_RNA",layer = "counts",y.max = 100000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoff,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoff,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_low,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1x,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2x,color='darkolivegreen1')
+# 
+# paste0('Human Tumor Feature Cutoffs are ',round(ht_feature_cutoff)," and ",round(ht_feature_cutoff_low))
+# 
+# #Human Tumor Mean
+# ht_feature_cutoffm <- mean(mouse_cellline_15k_low$nCount_RNA)+3*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_2x_feature_cutoffm <- mean(mouse_cellline_15k_low$nCount_RNA)+2*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_4x_feature_cutoffm <- mean(mouse_cellline_15k_low$nCount_RNA)+4*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_feature_cutoff_lowm <- mean(mouse_cellline_15k_low$nCount_RNA)-1.5*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_feature_cutoff_low1xm<- mean(mouse_cellline_15k_low$nCount_RNA)-1*sd(mouse_cellline_15k_low$nCount_RNA)
+# ht_feature_cutoff_low2xm <- mean(mouse_cellline_15k_low$nCount_RNA)-2*sd(mouse_cellline_15k_low$nCount_RNA)
+# 
+# 
+# plot2 <- VlnPlot(mouse_cellline_15k_low,features = "nCount_RNA",layer = "counts",y.max = 100000)+NoLegend()+ggtitle("Human Tumor")+
+#   geom_hline(yintercept = ht_feature_cutoffm,color='blue')+
+#   geom_hline(yintercept = ht_2x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_4x_feature_cutoffm,color='lightblue')+
+#   geom_hline(yintercept = ht_feature_cutoff_lowm,color='limegreen')+
+#   geom_hline(yintercept = ht_feature_cutoff_low1xm,color='darkolivegreen1')+
+#   geom_hline(yintercept = ht_feature_cutoff_low2xm,color='darkolivegreen1')
+# 
+# suppressWarnings(grid.arrange(plot1,plot2,ncol=2,top = "RNA Counts with Cutoff Lines"))
+```
